@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::NaiveDate;
+use serde::Serialize;
 use sqlx::SqlitePool;
 
 use crate::models::corridor::{Corridor, CorridorAnalytics, CorridorMetrics};
@@ -9,7 +10,8 @@ pub struct CorridorAggregates {
 }
 
 impl CorridorAggregates {
-    pub fn new(pool: SqlitePool) -> Self {
+    #[must_use]
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
@@ -22,13 +24,13 @@ impl CorridorAggregates {
         let corridor_key = analytics.corridor.to_string_key();
 
         let metrics = sqlx::query_as::<_, CorridorMetrics>(
-            r#"
+            r"
             INSERT INTO corridor_metrics (
                 corridor_key, asset_a_code, asset_a_issuer, asset_b_code, asset_b_issuer,
                 date, total_transactions, successful_transactions, failed_transactions,
                 success_rate, volume_usd
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (corridor_key, date) DO UPDATE SET
                 total_transactions = EXCLUDED.total_transactions,
                 successful_transactions = EXCLUDED.successful_transactions,
@@ -37,7 +39,7 @@ impl CorridorAggregates {
                 volume_usd = EXCLUDED.volume_usd,
                 updated_at = CURRENT_TIMESTAMP
             RETURNING *
-            "#,
+            ",
         )
         .bind(&corridor_key)
         .bind(&analytics.corridor.asset_a_code)
@@ -67,11 +69,11 @@ impl CorridorAggregates {
         let end_datetime = end_date.and_hms_opt(23, 59, 59).unwrap().and_utc();
 
         let metrics = sqlx::query_as::<_, CorridorMetrics>(
-            r#"
+            r"
             SELECT * FROM corridor_metrics
-            WHERE corridor_key = $1 AND date >= $2 AND date <= $3
+            WHERE corridor_key = ? AND date >= ? AND date <= ?
             ORDER BY date DESC
-            "#,
+            ",
         )
         .bind(&corridor_key)
         .bind(start_datetime)
@@ -90,11 +92,11 @@ impl CorridorAggregates {
         let next_day = date_datetime + chrono::Duration::days(1);
 
         let metrics = sqlx::query_as::<_, CorridorMetrics>(
-            r#"
+            r"
             SELECT * FROM corridor_metrics
-            WHERE date >= $1 AND date < $2
+            WHERE date >= ? AND date < ?
             ORDER BY volume_usd DESC
-            "#,
+            ",
         )
         .bind(date_datetime)
         .bind(next_day)
@@ -113,7 +115,7 @@ impl CorridorAggregates {
         let end_datetime = end_date.and_hms_opt(23, 59, 59).unwrap().and_utc();
 
         let metrics = sqlx::query_as::<_, AggregatedCorridorMetrics>(
-            r#"
+            r"
             SELECT
                 corridor_key,
                 asset_a_code,
@@ -127,10 +129,10 @@ impl CorridorAggregates {
                 SUM(volume_usd) as total_volume_usd,
                 MAX(date) as latest_date
             FROM corridor_metrics
-            WHERE date >= $1 AND date <= $2
+            WHERE date >= ? AND date <= ?
             GROUP BY corridor_key, asset_a_code, asset_a_issuer, asset_b_code, asset_b_issuer
             ORDER BY total_volume_usd DESC
-            "#,
+            ",
         )
         .bind(start_datetime)
         .bind(end_datetime)
@@ -149,12 +151,12 @@ impl CorridorAggregates {
         let next_day = date_datetime + chrono::Duration::days(1);
 
         let metrics = sqlx::query_as::<_, CorridorMetrics>(
-            r#"
+            r"
             SELECT * FROM corridor_metrics
-            WHERE date >= $1 AND date < $2
+            WHERE date >= ? AND date < ?
             ORDER BY volume_usd DESC
-            LIMIT $3
-            "#,
+            LIMIT ?
+            ",
         )
         .bind(date_datetime)
         .bind(next_day)
@@ -174,12 +176,12 @@ impl CorridorAggregates {
         let next_day = date_datetime + chrono::Duration::days(1);
 
         let metrics = sqlx::query_as::<_, CorridorMetrics>(
-            r#"
+            r"
             SELECT * FROM corridor_metrics
-            WHERE date >= $1 AND date < $2
+            WHERE date >= ? AND date < ?
             ORDER BY total_transactions DESC
-            LIMIT $3
-            "#,
+            LIMIT ?
+            ",
         )
         .bind(date_datetime)
         .bind(next_day)
@@ -200,13 +202,13 @@ impl CorridorAggregates {
         let next_day = date_datetime + chrono::Duration::days(1);
 
         let metrics = sqlx::query_as::<_, CorridorMetrics>(
-            r#"
+            r"
             SELECT * FROM corridor_metrics
-            WHERE date >= $1 AND date < $2
-            AND success_rate >= $3
-            AND total_transactions >= $4
+            WHERE date >= ? AND date < ?
+            AND success_rate >= ?
+            AND total_transactions >= ?
             ORDER BY success_rate DESC, total_transactions DESC
-            "#,
+            ",
         )
         .bind(date_datetime)
         .bind(next_day)
@@ -227,7 +229,7 @@ impl CorridorAggregates {
         let end_datetime = end_date.and_hms_opt(23, 59, 59).unwrap().and_utc();
 
         let stats = sqlx::query_as::<_, CorridorSummaryStats>(
-            r#"
+            r"
             SELECT 
                 COUNT(*) as total_corridors,
                 SUM(total_transactions) as total_transactions,
@@ -236,8 +238,8 @@ impl CorridorAggregates {
                 SUM(volume_usd) as total_volume_usd,
                 AVG(success_rate) as avg_success_rate
             FROM corridor_metrics
-            WHERE date >= $1 AND date <= $2
-            "#,
+            WHERE date >= ? AND date <= ?
+            ",
         )
         .bind(start_datetime)
         .bind(end_datetime)
@@ -250,11 +252,11 @@ impl CorridorAggregates {
     pub async fn delete_old_metrics(&self, cutoff_date: NaiveDate) -> Result<u64> {
         let cutoff_datetime = cutoff_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
 
-        let result = sqlx::query(
-            r#"
+        let result: sqlx::sqlite::SqliteQueryResult = sqlx::query(
+            r"
             DELETE FROM corridor_metrics
-            WHERE date < $1
-            "#,
+            WHERE date < ?
+            ",
         )
         .bind(cutoff_datetime)
         .execute(&self.pool)
@@ -264,7 +266,7 @@ impl CorridorAggregates {
     }
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct AggregatedCorridorMetrics {
     pub corridor_key: String,
     pub asset_a_code: String,

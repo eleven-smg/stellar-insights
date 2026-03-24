@@ -4,13 +4,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
-    database::Database,
-    models::{PendingTransaction, PendingTransactionWithSignatures, Signature, TransactionResult},
+    models::{PendingTransaction, PendingTransactionWithSignatures, TransactionResult},
     state::AppState,
 };
 
@@ -42,33 +40,35 @@ pub async fn create_transaction(
     State(state): State<AppState>,
     Json(req): Json<CreateTransactionRequest>,
 ) -> Result<Json<PendingTransaction>, (StatusCode, String)> {
-    let tx = state
+    let pending_transaction = state
         .db
         .create_pending_transaction(&req.source_account, &req.xdr, req.required_signatures)
         .await
         .map_err(|e| {
             tracing::error!("Failed to create transaction: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
         })?;
 
-    Ok(Json(tx))
+    Ok(Json(pending_transaction))
 }
 
 pub async fn get_transaction(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<PendingTransactionWithSignatures>, (StatusCode, String)> {
-    let tx = state
-        .db
-        .get_pending_transaction(&id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get transaction: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
-        })?;
+    let pending_transaction = state.db.get_pending_transaction(&id).await.map_err(|e| {
+        tracing::error!("Failed to get transaction: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_string(),
+        )
+    })?;
 
-    if let Some(tx) = tx {
-        Ok(Json(tx))
+    if let Some(transaction_with_signatures) = pending_transaction {
+        Ok(Json(transaction_with_signatures))
     } else {
         Err((StatusCode::NOT_FOUND, "Transaction not found".to_string()))
     }
@@ -81,14 +81,25 @@ pub async fn add_signature(
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Basic validation
     let tx_opt = state.db.get_pending_transaction(&id).await.map_err(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_string(),
+        )
     })?;
 
-    let tx_with_sigs = tx_opt.ok_or((StatusCode::NOT_FOUND, "Transaction not found".to_string()))?;
+    let tx_with_sigs =
+        tx_opt.ok_or((StatusCode::NOT_FOUND, "Transaction not found".to_string()))?;
 
     // Check if signature already exists for this signer
-    if tx_with_sigs.collected_signatures.iter().any(|s| s.signer == req.signer) {
-        return Err((StatusCode::BAD_REQUEST, "Signature already exists from this signer".to_string()));
+    if tx_with_sigs
+        .collected_signatures
+        .iter()
+        .any(|s| s.signer == req.signer)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Signature already exists from this signer".to_string(),
+        ));
     }
 
     state
@@ -97,7 +108,10 @@ pub async fn add_signature(
         .await
         .map_err(|e| {
             tracing::error!("Failed to add signature: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
         })?;
 
     // Update status if we reached required signatures
@@ -114,12 +128,18 @@ pub async fn submit_transaction(
     Path(id): Path<String>,
 ) -> Result<Json<TransactionResult>, (StatusCode, String)> {
     let tx_opt = state.db.get_pending_transaction(&id).await.map_err(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_string(),
+        )
     })?;
 
-    let tx_with_sigs = tx_opt.ok_or((StatusCode::NOT_FOUND, "Transaction not found".to_string()))?;
+    let tx_with_sigs =
+        tx_opt.ok_or((StatusCode::NOT_FOUND, "Transaction not found".to_string()))?;
 
-    if (tx_with_sigs.collected_signatures.len() as i32) < tx_with_sigs.transaction.required_signatures {
+    if (tx_with_sigs.collected_signatures.len() as i32)
+        < tx_with_sigs.transaction.required_signatures
+    {
         return Err((StatusCode::BAD_REQUEST, "Not enough signatures".to_string()));
     }
 
@@ -129,10 +149,14 @@ pub async fn submit_transaction(
     // 3. Submit to Stellar network using `reqwest` or `rpc_client`
 
     // Mock successful submission
-    let mock_hash = Uuid::new_v4().to_string().replace("-", "");
-    
+    let mock_hash = Uuid::new_v4().to_string().replace('-', "");
+
     // Update status in DB
-    state.db.update_transaction_status(&id, "submitted").await.ok();
+    state
+        .db
+        .update_transaction_status(&id, "submitted")
+        .await
+        .ok();
 
     Ok(Json(TransactionResult {
         hash: mock_hash,

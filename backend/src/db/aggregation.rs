@@ -9,7 +9,8 @@ pub struct AggregationDb {
 }
 
 impl AggregationDb {
-    pub fn new(pool: SqlitePool) -> Self {
+    #[must_use]
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
@@ -21,7 +22,7 @@ impl AggregationDb {
         limit: i64,
     ) -> Result<Vec<crate::models::corridor::PaymentRecord>> {
         let records = sqlx::query_as::<_, PaymentRecordRow>(
-            r#"
+            r"
             SELECT 
                 id,
                 transaction_hash,
@@ -36,7 +37,7 @@ impl AggregationDb {
             WHERE created_at >= ? AND created_at <= ?
             ORDER BY created_at ASC
             LIMIT ?
-            "#,
+            ",
         )
         .bind(start_time.to_rfc3339())
         .bind(end_time.to_rfc3339())
@@ -81,7 +82,26 @@ impl AggregationDb {
         Ok(payment_records)
     }
 
-    /// Upsert hourly corridor metric
+    /// Upserts a single hourly corridor metric row into `corridor_metrics_hourly`.
+    ///
+    /// # Merge Strategy
+    ///
+    /// The table uses `(corridor_key, hour_bucket)` as a logical uniqueness boundary.
+    /// When a row already exists for that boundary, we merge new observations into the
+    /// existing aggregate using metric-specific rules:
+    ///
+    /// - Transaction counters are additive (`+ excluded.*`) so repeated batch runs can
+    ///   accumulate all events observed for the hour.
+    /// - `success_rate` is recomputed from merged counters instead of averaged from prior
+    ///   percentages to avoid compounded rounding errors.
+    /// - `volume_usd` is additive because it represents total notional throughput.
+    /// - Slippage, settlement latency, and liquidity are blended via arithmetic mean as
+    ///   lightweight approximations when full per-payment distributions are unavailable.
+    ///
+    /// # Why This Matters
+    ///
+    /// Aggregation jobs can retry or process overlapping windows. This upsert policy keeps
+    /// hourly metrics deterministic and prevents duplicate inserts for the same corridor/hour.
     pub async fn upsert_hourly_corridor_metric(
         &self,
         metric: &HourlyCorridorMetrics,
@@ -89,7 +109,7 @@ impl AggregationDb {
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
-            r#"
+            r"
             INSERT INTO corridor_metrics_hourly (
                 id,
                 corridor_key,
@@ -110,11 +130,14 @@ impl AggregationDb {
                 updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(corridor_key, hour_bucket) DO UPDATE SET
+                -- Counters are cumulative across retries/batches for the same hour bucket.
                 total_transactions = total_transactions + excluded.total_transactions,
                 successful_transactions = successful_transactions + excluded.successful_transactions,
                 failed_transactions = failed_transactions + excluded.failed_transactions,
+                -- Recompute from merged counts rather than averaging percentages.
                 success_rate = (successful_transactions * 100.0) / NULLIF(total_transactions, 0),
                 volume_usd = volume_usd + excluded.volume_usd,
+                -- Blend point estimates when raw distributions are not retained.
                 avg_slippage_bps = (avg_slippage_bps + excluded.avg_slippage_bps) / 2.0,
                 avg_settlement_latency_ms = COALESCE(
                     (avg_settlement_latency_ms + excluded.avg_settlement_latency_ms) / 2,
@@ -123,7 +146,7 @@ impl AggregationDb {
                 ),
                 liquidity_depth_usd = (liquidity_depth_usd + excluded.liquidity_depth_usd) / 2.0,
                 updated_at = ?
-            "#,
+            ",
         )
         .bind(&metric.id)
         .bind(&metric.corridor_key)
@@ -157,7 +180,7 @@ impl AggregationDb {
         end_time: DateTime<Utc>,
     ) -> Result<Vec<HourlyCorridorMetrics>> {
         let rows = sqlx::query_as::<_, HourlyCorridorMetricsRow>(
-            r#"
+            r"
             SELECT 
                 id,
                 corridor_key,
@@ -177,7 +200,7 @@ impl AggregationDb {
             FROM corridor_metrics_hourly
             WHERE hour_bucket >= ? AND hour_bucket <= ?
             ORDER BY hour_bucket ASC
-            "#,
+            ",
         )
         .bind(start_time.to_rfc3339())
         .bind(end_time.to_rfc3339())
@@ -220,10 +243,10 @@ impl AggregationDb {
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
-            r#"
+            r"
             INSERT INTO aggregation_jobs (id, job_type, status, created_at, updated_at)
             VALUES (?, ?, 'pending', ?, ?)
-            "#,
+            ",
         )
         .bind(job_id)
         .bind(job_type)
@@ -236,7 +259,16 @@ impl AggregationDb {
         Ok(())
     }
 
-    /// Update aggregation job status
+    /// Update aggregation job status.
+    ///
+    /// The function dynamically selects which lifecycle timestamp to mutate based on the
+    /// target status:
+    /// - `running` -> `start_time`
+    /// - `completed` / `failed` -> `end_time`
+    /// - any other transitional status -> `updated_at`
+    ///
+    /// This keeps one API surface for status transitions while preserving timing metadata
+    /// needed for latency/retry observability.
     pub async fn update_aggregation_job_status(
         &self,
         job_id: &str,
@@ -252,12 +284,11 @@ impl AggregationDb {
         };
 
         let query_str = format!(
-            r#"
+            r"
             UPDATE aggregation_jobs
-            SET status = ?, error_message = ?, {} = ?, updated_at = ?
+            SET status = ?, error_message = ?, {time_field} = ?, updated_at = ?
             WHERE id = ?
-            "#,
-            time_field
+            "
         );
 
         sqlx::query(&query_str)
@@ -278,11 +309,11 @@ impl AggregationDb {
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
-            r#"
+            r"
             UPDATE aggregation_jobs
             SET last_processed_hour = ?, updated_at = ?
             WHERE id = ?
-            "#,
+            ",
         )
         .bind(last_hour)
         .bind(&now)
@@ -297,9 +328,9 @@ impl AggregationDb {
     /// Get job retry count
     pub async fn get_job_retry_count(&self, job_id: &str) -> Result<i32> {
         let row: (i32,) = sqlx::query_as(
-            r#"
+            r"
             SELECT retry_count FROM aggregation_jobs WHERE id = ?
-            "#,
+            ",
         )
         .bind(job_id)
         .fetch_one(&self.pool)
@@ -314,11 +345,11 @@ impl AggregationDb {
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
-            r#"
+            r"
             UPDATE aggregation_jobs
             SET retry_count = retry_count + 1, updated_at = ?
             WHERE id = ?
-            "#,
+            ",
         )
         .bind(&now)
         .bind(job_id)
@@ -331,13 +362,18 @@ impl AggregationDb {
 }
 
 // Database row structures
+// Note: Some fields are fetched from DB for completeness but not used in Rust code.
+// They're kept for potential future use and to match the SQL SELECT statement.
 #[derive(sqlx::FromRow)]
-#[allow(dead_code)]
 struct PaymentRecordRow {
     id: String,
+    #[allow(dead_code)] // Fetched from DB but not used in conversion to PaymentRecord
     transaction_hash: String,
+    #[allow(dead_code)] // Fetched from DB but not used in conversion to PaymentRecord
     source_account: String,
+    #[allow(dead_code)] // Fetched from DB but not used in conversion to PaymentRecord
     destination_account: String,
+    #[allow(dead_code)] // Fetched from DB but not used in conversion to PaymentRecord
     asset_type: String,
     asset_code: Option<String>,
     asset_issuer: Option<String>,

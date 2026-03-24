@@ -21,7 +21,7 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+            Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
         (status, message).into_response()
     }
@@ -29,7 +29,7 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
-        ApiError::Internal(err.to_string())
+        Self::Internal(err.to_string())
     }
 }
 
@@ -39,7 +39,7 @@ pub struct RankingsParams {
     limit: i64,
 }
 
-fn default_limit() -> i64 {
+const fn default_limit() -> i64 {
     50
 }
 
@@ -49,7 +49,7 @@ pub struct HistoryParams {
     limit: i64,
 }
 
-fn default_history_limit() -> i64 {
+const fn default_history_limit() -> i64 {
     30 // 30 days
 }
 
@@ -57,7 +57,10 @@ pub fn routes(analyzer: Arc<TrustlineAnalyzer>) -> Router {
     Router::new()
         .route("/stats", get(get_trustline_metrics))
         .route("/rankings", get(get_trustline_rankings))
-        .route("/:asset_code/:asset_issuer/history", get(get_trustline_history))
+        .route(
+            "/:asset_code/:asset_issuer/history",
+            get(get_trustline_history),
+        )
         .with_state(analyzer)
 }
 

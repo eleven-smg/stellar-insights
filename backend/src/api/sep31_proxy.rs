@@ -34,7 +34,14 @@ pub struct Sep31State {
     pub client: Arc<Client>,
 }
 
+impl Default for Sep31State {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sep31State {
+    #[must_use]
     pub fn new() -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
@@ -50,7 +57,7 @@ fn base_url(transfer_server: &str) -> String {
     transfer_server.trim().trim_end_matches('/').to_string()
 }
 
-/// GET /api/sep31/info?transfer_server=<url>
+/// GET /`api/sep31/info?transfer_server`=<url>
 #[derive(Debug, Deserialize)]
 pub struct InfoQuery {
     pub transfer_server: String,
@@ -107,7 +114,7 @@ pub async fn post_quote(
     let url = format!("{}/quote", base_url(&body.transfer_server));
     let mut req = state.client.post(&url);
     if let Some(jwt) = &body.jwt {
-        req = req.header("Authorization", format!("Bearer {}", jwt));
+        req = req.header("Authorization", format!("Bearer {jwt}"));
     }
     let resp = req
         .json(&body.payload)
@@ -149,7 +156,7 @@ pub async fn post_transaction(
     let url = format!("{}/transactions", base_url(&body.transfer_server));
     let mut req = state.client.post(&url);
     if let Some(jwt) = &body.jwt {
-        req = req.header("Authorization", format!("Bearer {}", jwt));
+        req = req.header("Authorization", format!("Bearer {jwt}"));
     }
     let resp = req
         .json(&body.payload)
@@ -169,7 +176,7 @@ pub async fn post_transaction(
     Ok(Json(data))
 }
 
-/// GET /api/sep31/transactions?transfer_server=&jwt=&...
+/// GET /`api/sep31/transactions?transfer_server=&jwt`=&...
 #[derive(Debug, Deserialize)]
 pub struct ListTransactionsQuery {
     pub transfer_server: String,
@@ -193,12 +200,12 @@ pub async fn get_transactions(
         ));
     }
     let base = base_url(&q.transfer_server);
-    let mut url = format!("{}/transactions?", base);
+    let mut url = format!("{base}/transactions?");
     if let Some(s) = &q.status {
         url.push_str(&format!("status={}&", urlencoding::encode(s)));
     }
     if let Some(l) = q.limit {
-        url.push_str(&format!("limit={}&", l));
+        url.push_str(&format!("limit={l}&"));
     }
     if let Some(c) = &q.cursor {
         url.push_str(&format!("cursor={}&", urlencoding::encode(c)));
@@ -207,9 +214,12 @@ pub async fn get_transactions(
 
     let mut req = state.client.get(url);
     if let Some(jwt) = &q.jwt {
-        req = req.header("Authorization", format!("Bearer {}", jwt));
+        req = req.header("Authorization", format!("Bearer {jwt}"));
     }
-    let resp = req.send().await.map_err(|e| Sep31Error::Proxy(e.to_string()))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| Sep31Error::Proxy(e.to_string()))?;
 
     let status = resp.status();
     let data = resp
@@ -223,7 +233,7 @@ pub async fn get_transactions(
     Ok(Json(data))
 }
 
-/// GET /api/sep31/transactions/:id?transfer_server=&jwt=
+/// GET /`api/sep31/transactions/:id?transfer_server=&jwt`=
 #[derive(Debug, Deserialize)]
 pub struct GetTransactionQuery {
     pub transfer_server: String,
@@ -241,13 +251,20 @@ pub async fn get_transaction(
             "Transfer server not in allowed list".to_string(),
         ));
     }
-    let url = format!("{}/transactions/{}", base_url(&q.transfer_server), urlencoding::encode(&id));
+    let url = format!(
+        "{}/transactions/{}",
+        base_url(&q.transfer_server),
+        urlencoding::encode(&id)
+    );
 
     let mut req = state.client.get(&url);
     if let Some(jwt) = &q.jwt {
-        req = req.header("Authorization", format!("Bearer {}", jwt));
+        req = req.header("Authorization", format!("Bearer {jwt}"));
     }
-    let resp = req.send().await.map_err(|e| Sep31Error::Proxy(e.to_string()))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| Sep31Error::Proxy(e.to_string()))?;
 
     let status = resp.status();
     let data = resp
@@ -261,7 +278,7 @@ pub async fn get_transaction(
     Ok(Json(data))
 }
 
-/// GET /api/sep31/customer?transfer_server=&jwt=&id= - KYC customer fetch
+/// GET /`api/sep31/customer?transfer_server=&jwt=&id`= - KYC customer fetch
 #[derive(Debug, Deserialize)]
 pub struct CustomerQuery {
     pub transfer_server: String,
@@ -287,9 +304,12 @@ pub async fn get_customer(
 
     let mut req = state.client.get(&url);
     if let Some(jwt) = &q.jwt {
-        req = req.header("Authorization", format!("Bearer {}", jwt));
+        req = req.header("Authorization", format!("Bearer {jwt}"));
     }
-    let resp = req.send().await.map_err(|e| Sep31Error::Proxy(e.to_string()))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| Sep31Error::Proxy(e.to_string()))?;
 
     let status = resp.status();
     let data = resp
@@ -325,7 +345,7 @@ pub async fn put_customer(
     let url = format!("{}/customer", base_url(&body.transfer_server));
     let mut req = state.client.put(&url);
     if let Some(jwt) = &body.jwt {
-        req = req.header("Authorization", format!("Bearer {}", jwt));
+        req = req.header("Authorization", format!("Bearer {jwt}"));
     }
     let resp = req
         .json(&body.payload)
@@ -372,15 +392,15 @@ pub enum Sep31Error {
 impl IntoResponse for Sep31Error {
     fn into_response(self) -> axum::response::Response {
         let (status, body) = match &self {
-            Sep31Error::Forbidden(msg) => (
+            Self::Forbidden(msg) => (
                 StatusCode::FORBIDDEN,
                 serde_json::json!({ "error": "forbidden", "message": msg }),
             ),
-            Sep31Error::Proxy(msg) => (
+            Self::Proxy(msg) => (
                 StatusCode::BAD_GATEWAY,
                 serde_json::json!({ "error": "proxy", "message": msg }),
             ),
-            Sep31Error::Anchor(code, data) => {
+            Self::Anchor(code, data) => {
                 let status = StatusCode::from_u16(*code).unwrap_or(StatusCode::BAD_GATEWAY);
                 (status, data.clone())
             }
@@ -420,7 +440,10 @@ mod tests {
             base_url("https://api.example.com/sep31"),
             "https://api.example.com/sep31"
         );
-        assert_eq!(base_url("https://api.example.com/"), "https://api.example.com");
+        assert_eq!(
+            base_url("https://api.example.com/"),
+            "https://api.example.com"
+        );
     }
 
     #[test]
